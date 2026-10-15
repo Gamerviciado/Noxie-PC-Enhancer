@@ -1,0 +1,71 @@
+name: Noxie Windows release
+
+on:
+  push:
+    branches: [main]
+    paths: [release-source.zip]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: noxie-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Import the prepared application source
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath release-source.zip) {
+            if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'Source import requires main' }
+            $staging = Join-Path $env:RUNNER_TEMP 'noxie-source'
+            Expand-Archive -LiteralPath release-source.zip -DestinationPath $staging
+            if (Test-Path -LiteralPath (Join-Path $staging '.git')) { throw 'Unexpected Git directory' }
+            Get-ChildItem -LiteralPath $staging -Force | ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName -Destination . -Recurse -Force
+            }
+            git rm -- release-source.zip
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add --all
+            git commit -m 'feat: replace legacy application with Noxie PC Enhancer 1.0.0'
+            if ($LASTEXITCODE -ne 0) { throw 'Source commit failed' }
+            git push origin HEAD:main
+            if ($LASTEXITCODE -ne 0) { throw 'Source publication failed' }
+          }
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/electron/install.js
+
+      - name: Validate
+        env:
+          CI: 'true'
+        run: npm run check
+
+      - name: Build Windows installers
+        run: npm run package:win
+
+      - name: Publish and verify release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-github-release.js
